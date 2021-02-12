@@ -9,6 +9,8 @@ import (
 	"github.com/yanorei32/ctl2mctl/status"
 )
 
+type Motor int
+
 type Sender struct {
 	MaxChangeAmount int
 	Interval        time.Duration
@@ -53,11 +55,59 @@ func createMotorspeed(
 	}
 }
 
+func abs(a int) int {
+	if a < 0 {
+		return -a
+	}
+	return a
+}
+
+func findMax(m motorspeed.Motorspeed) int {
+	maxV := 0
+
+	if maxV < m.X {
+		maxV = m.X
+	}
+
+	if maxV < m.Y {
+		maxV = m.Y
+	}
+
+	if maxV < m.Z {
+		maxV = m.Z
+	}
+
+	if maxV < m.W {
+		maxV = m.W
+	}
+
+	return maxV
+}
+
 func (s Sender) dampMotorspeed(
 	virt motorspeed.Motorspeed,
 	curr motorspeed.Motorspeed,
-) (next motorspeed.Motorspeed) {
-	return virt
+) motorspeed.Motorspeed {
+	absDist := virt.Combine(curr, func(a, b int) int {
+		return abs(a - b)
+	})
+
+	maxAbsDist := findMax(absDist)
+
+	if maxAbsDist < s.MaxChangeAmount {
+		return virt
+	}
+
+	dist := virt.Combine(curr, func(a, b int) int {
+		return a - b
+	})
+
+	return curr.Combine(
+		dist.Gain(float32(s.MaxChangeAmount) / float32(maxAbsDist)),
+		func(a, b int) int {
+			return a + b
+		},
+	).Limit()
 }
 
 func (s Sender) Send(
