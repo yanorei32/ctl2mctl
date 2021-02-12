@@ -108,7 +108,7 @@ func (r Receiver) processLine(
 func (r Receiver) Receive(
 	from io.Reader,
 	to *status.ControlState,
-	log *log.Logger,
+	l *log.Logger,
 ) {
 	incoming := make(chan string)
 	ioerr := make(chan error)
@@ -137,6 +137,8 @@ func (r Receiver) Receive(
 			}
 
 		case <-timeout.C:
+			l.Println("Recv : timeout")
+
 			to.Lock()
 			to.Velocity = 0.0
 			to.Unlock()
