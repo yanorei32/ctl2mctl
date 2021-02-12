@@ -76,7 +76,6 @@ func min(a, b int) int {
 	}
 }
 
-
 func serializeSingleMotorSpeed(v int) string {
 	s := ""
 
@@ -146,7 +145,6 @@ func send() {
 				),
 				state.Velocity,
 			)
-
 		} else {
 			// right - back
 			ms = motorspeedGain(
