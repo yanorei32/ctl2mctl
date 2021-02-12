@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -19,36 +20,39 @@ type SnapTurn int
 const (
 	None SnapTurn = iota
 	Left
-	Right	
+	Right
 )
 
 type MotorSpeed struct {
 	X, Y, Z, W int
 }
 
-type State struct {
+type ControlState struct {
 	sync.RWMutex
 	Direction, Velocity float32
-	Turning SnapTurn
+	Turning             SnapTurn
 }
 
-var state State
-
-func debug(log *log.Logger) {
-	for {
-		time.Sleep(time.Millisecond * 50)
-
-		state.RLock()
-		log.Println(state.Turning)
-		state.RUnlock()
-	}
+type MotorState struct {
+	sync.RWMutex
+	MotorSpeed MotorSpeed
 }
+
+// func debug(log *log.Logger) {
+// 	for {
+// 		time.Sleep(time.Millisecond * 50)
+//
+// 		state.RLock()
+// 		log.Println(state.Turning)
+// 		state.RUnlock()
+// 	}
+// }
 
 func motorspeedLerp(a, b MotorSpeed, v float32) (x MotorSpeed) {
-	x.X = a.X + int(float32(b.X - a.X) * v)
-	x.Y = a.Y + int(float32(b.Y - a.Y) * v)
-	x.Z = a.Z + int(float32(b.Z - a.Z) * v)
-	x.W = a.W + int(float32(b.W - a.W) * v)
+	x.X = a.X + int(float32(b.X-a.X)*v)
+	x.Y = a.Y + int(float32(b.Y-a.Y)*v)
+	x.Z = a.Z + int(float32(b.Z-a.Z)*v)
+	x.W = a.W + int(float32(b.W-a.W)*v)
 	return x
 }
 
@@ -91,87 +95,85 @@ func serializeSingleMotorSpeed(v int) string {
 	return s
 }
 
-func send() {
-	sendInterval := 50 * time.Millisecond
-
-	stRight	:= MotorSpeed{255, 255, 255, 255}
-	stLeft	:= MotorSpeed{-255, -255, -255, -255}
-	forward	:= MotorSpeed{255, -255, -255, 255}
-	back	:= MotorSpeed{-255, 255, 255, -255}
-	left	:= MotorSpeed{-255, -255, 255, 255}
-	right	:= MotorSpeed{255, 255, -255, -255}
+func translator(c *ControlState, m *MotorState, interval time.Duration) {
+	stRight := MotorSpeed{255, 255, 255, 255}
+	stLeft := MotorSpeed{-255, -255, -255, -255}
+	forward := MotorSpeed{255, -255, -255, 255}
+	back := MotorSpeed{-255, 255, 255, -255}
+	left := MotorSpeed{-255, -255, 255, 255}
+	right := MotorSpeed{255, 255, -255, -255}
 
 	var ms MotorSpeed
 
 	for {
-		state.RLock()
+		c.RLock()
 
-		if state.Turning == Right {
+		if c.Turning == Right {
 			// turn right
 			ms = motorspeedGain(
 				stRight,
 				0.5,
 			)
-		} else if state.Turning == Left {
+		} else if c.Turning == Left {
 			// turn left
 			ms = motorspeedGain(
 				stLeft,
 				0.5,
 			)
-		} else if state.Direction < -90 {
+		} else if c.Direction < -90 {
 			// left - back
 			ms = motorspeedGain(
 				motorspeedLerp(
 					left, back,
-					float32(-state.Direction - 90) / 90,
+					float32(-c.Direction-90)/90,
 				),
-				state.Velocity,
+				c.Velocity,
 			)
-		} else if state.Direction < 0 {
+		} else if c.Direction < 0 {
 			// left - forward
 			ms = motorspeedGain(
 				motorspeedLerp(
 					forward, left,
-					float32(-state.Direction) / 90,
+					float32(-c.Direction)/90,
 				),
-				state.Velocity,
+				c.Velocity,
 			)
-		} else if state.Direction < 90 {
+		} else if c.Direction < 90 {
 			// forward - right
 			ms = motorspeedGain(
 				motorspeedLerp(
 					forward, right,
-					float32(state.Direction) / 90,
+					float32(c.Direction)/90,
 				),
-				state.Velocity,
+				c.Velocity,
 			)
 		} else {
 			// right - back
 			ms = motorspeedGain(
 				motorspeedLerp(
 					right, back,
-					float32(state.Direction - 90) / 90,
+					float32(c.Direction-90)/90,
 				),
-				state.Velocity,
+				c.Velocity,
 			)
 		}
 
-		state.RUnlock()
+		c.RUnlock()
 
-		fmt.Printf(
-			"x%v\ny%v\nz%v\nw%v\n",
-			serializeSingleMotorSpeed(ms.X),
-			serializeSingleMotorSpeed(ms.Y),
-			serializeSingleMotorSpeed(ms.Z),
-			serializeSingleMotorSpeed(ms.W),
-		)
-		time.Sleep(sendInterval)
+		m.Lock()
+		m.MotorSpeed = ms
+		m.Unlock()
+
+		time.Sleep(interval)
 	}
 }
 
-func recv(log *log.Logger) {
-	stdin := bufio.NewReader(os.Stdin)
-
+func receiver(
+	r *bufio.Reader,
+	c *ControlState,
+	log *log.Logger,
+	timeout time.Duration,
+) {
 	snapTurnDuration := 250 * time.Millisecond
 	moveRegexp := regexp.MustCompile("^move \\d(\\.\\d+)? -?\\d+(\\.\\d+)?$")
 	snapTurnRegexp := regexp.MustCompile("^snapturn (left|right)$")
@@ -183,15 +185,15 @@ func recv(log *log.Logger) {
 			select {
 			case <-renew:
 			case <-time.After(1 * time.Second):
-				state.Lock()
-				state.Velocity = float32(0)
-				state.Unlock()
+				c.Lock()
+				c.Velocity = float32(0)
+				c.Unlock()
 			}
 		}
 	})()
 
 	for {
-		l, err := stdin.ReadString('\n')
+		l, err := r.ReadString('\n')
 
 		if err != nil {
 			log.Fatal(err)
@@ -224,11 +226,11 @@ func recv(log *log.Logger) {
 				log.Printf("Invalid direction: %f\n", direction)
 				continue
 			}
-			
-			state.Lock()
-			state.Velocity = float32(velocity)
-			state.Direction = float32(direction)
-			state.Unlock()
+
+			c.Lock()
+			c.Velocity = float32(velocity)
+			c.Direction = float32(direction)
+			c.Unlock()
 
 		} else if snapTurnRegexp.Match(lb) {
 			var t SnapTurn
@@ -246,28 +248,57 @@ func recv(log *log.Logger) {
 
 			go (func() {
 				time.Sleep(snapTurnDuration)
-				state.Lock()
-				state.Turning = None
-				state.Unlock()
+				c.Lock()
+				c.Turning = None
+				c.Unlock()
 			})()
 
-			state.Lock()
-			state.Turning = t
-			state.Unlock()
+			c.Lock()
+			c.Turning = t
+			c.Unlock()
 		} else {
 			log.Printf("invalid command: %v\n", l)
 		}
 	}
 }
 
+func dumper(v *MotorState, r *MotorState, interval time.Duration) {
+	for {
+		v.RLock()
+		r.Lock()
+
+		r.Unlock()
+		v.RUnlock()
+
+		time.Sleep(interval)
+	}
+}
+
+func sender(m *MotorState, interval time.Duration, o io.Writer) {
+	for {
+		m.RLock()
+
+		m.RUnlock()
+		time.Sleep(interval)
+	}
+}
+
 func main() {
 	l := log.New(os.Stderr, "", 0)
 
-	go send()
-	go recv(l)
+	cState := ControlState{}
+	virtMState := MotorState{}
+	realMState := MotorState{}
+
+	timeout := 250 * time.Millisecond
+	interval := 50 * time.Millisecond
+
+	go receiver(bufio.NewReader(os.Stdin), &cState, l, timeout)
+	go translator(&cState, &virtMState, interval)
+	go dumper(&virtMState, &realMState, interval)
+	go sender(&realMState, interval, os.Stdout)
 
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
 	<-sc
 }
-
